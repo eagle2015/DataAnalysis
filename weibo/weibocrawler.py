@@ -2,6 +2,7 @@ __author__ = 'Administrator'
 
 import http.cookiejar
 import urllib.request
+from urllib.error import *
 import urllib.parse
 import json
 from bs4 import BeautifulSoup
@@ -33,6 +34,10 @@ class WeiboCrawler:
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36'
                           ' (KHTML, like Gecko) Chrome/37.0.2062.124 Safari/537.36'
         }
+        self.TRY_TIMES = 10
+        self.SLEEP_TIME = 5
+        self.user_id = None
+        self.stage_id = None
         # self.seed = 'http://m.weibo.cn/login?ns=1&backURL=http%3A%2F%2Fm.weibo.cn%2F&backTitle=%CE%A2%B2%A9&vt=4&'
 
     def change_proxy(self):
@@ -69,6 +74,20 @@ class WeiboCrawler:
             print("login successful")
         except Exception:
             print("login failed")
+        self.change_header()
+        uid_re = re.compile('"uid":"(.*?)"')
+        sid_re = re.compile("\'stageId\':\'(.*?)\'")
+        rsp = self.opener.open('http://m.weibo.cn/')
+        find = uid_re.findall(rsp.read().decode())
+        self.user_id = find[0]
+        rsp = self.opener.open('http://m.weibo.cn/u/'+self.user_id)
+        find = sid_re.findall(rsp.read().decode())
+        self.stage_id = str(find[0])
+        # html = BeautifulSoup(rsp.read().decode())
+        print('stage'+self.stage_id)
+        print('uid'+self.user_id)
+
+
 
     def make_my_opener(self):
         """
@@ -105,11 +124,14 @@ class WeiboCrawler:
             'Connection': 'keep-alive',
             'Accept-Language': 'zh-CN,zh;q=0.8,en;q=0.6',
             'Host': 'm.weibo.cn',
-            'Referer': 'http://m.weibo.cn/page/tpl?containerid=1005052210643391_-_WEIBO_SECOND_PROFILE_WEIBO',
+            # 'Referer': 'http://m.weibo.cn/page/tpl?containerid='+str(self.stage_id)+'_-_WEIBO_SECOND_PROFILE_WEIBO',
             'Proxy-Connection': 'keep-alive',
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36'
                           ' (KHTML, like Gecko) Chrome/37.0.2062.124 Safari/537.36'
         }
+        if self.stage_id is not None:
+            head['Referer'] = 'http://m.weibo.cn/page/tpl?containerid='+str(self.stage_id)+\
+                              '_-_WEIBO_SECOND_PROFILE_WEIBO'
         header = []
         for key, value in head.items():
             elem = (key, value)
@@ -225,7 +247,8 @@ class WeiboCrawler:
     def grab_user_blogs(self):
         error = False
         page = 1
-        url = 'http://m.weibo.cn/page/json?containerid=1005052210643391_-_WEIBO_SECOND_PROFILE_WEIBO&page='+str(page)
+        url = 'http://m.weibo.cn/page/json?containerid='+str(self.stage_id)+'_-_WEIBO_SECOND_PROFILE_WEIBO' \
+                                                                            '&page='+str(page)
         print("正在打开："+url)
         rsp = self.opener.open(url)
         return_json = json.loads(rsp.read().decode())
@@ -241,7 +264,8 @@ class WeiboCrawler:
         page += 1
 
         while page <= max_page:
-            url = 'http://m.weibo.cn/page/json?containerid=1005052210643391_-_WEIBO_SECOND_PROFILE_WEIBO&page='+str(page)
+            url = 'http://m.weibo.cn/page/json?containerid='+str(self.stage_id)+'-_WEIBO_SECOND_PROFILE_WEIBO&' \
+                                                                                'page='+str(page)
             print("正在打开："+url)
             rsp = self.opener.open(url)
             return_json = json.loads(rsp.read().decode())
@@ -261,16 +285,13 @@ class WeiboCrawler:
                     self.insert_blog_info(blog_info['mblog'])
             if not error:
                 page += 1
-            sleep(1)
+            sleep(self.SLEEP_TIME)
             self.change_proxy()
 
     def start(self):
         self.login()
-        self.change_header()
-        rep = self.opener.open('http://m.weibo.cn/u/2761708031')
-        print(rep.read().decode())
-        # self.grab_user_blogs()
-        # self.grab_fans()
+        self.grab_user_blogs()
+        # self.grab_fans(self.user_id)
         # self.mysqlconn.close()
         #
         # self.save_pic()
@@ -292,7 +313,20 @@ class WeiboCrawler:
         url = 'http://m.weibo.cn/single/rcList?format=cards&id='
         req_url = url + str(blog_id) + '&type=comment&hot=0&page='+str(page_num)
         print('浏览器正在打开url：'+req_url)
-        rsp = self.opener.open(req_url)
+        rsp = None
+        time = 0
+        while time <= self.TRY_TIMES:
+            try:
+                rsp = self.opener.open(req_url)
+                break
+            except HTTPError as e:
+                sleep(10)
+                time += 1
+                print(e)
+                print('try time:'+str(time))
+        if rsp is None:
+            print('can\'t open url'+req_url)
+            return
         return_json = json.loads(rsp.read().decode())
         print('请求返回数据:\t'+str(return_json))
         if page_num == 1:
@@ -326,13 +360,26 @@ class WeiboCrawler:
                     self.insert_comment_info(comment_group)
                     # self.print_comment(comment_group)
             page += 1
-            sleep(1)
+            sleep(self.SLEEP_TIME)
             self.change_proxy()
 
     def grab_weibo(self):
         open_url = 'http://m.weibo.cn/index/feed?format=cards'
         print('浏览器正在打开url：' + open_url)
-        rsp = self.opener.open(open_url)
+        rsp = None
+        try_time = 0
+        while try_time <= self.TRY_TIMES:
+            try:
+                rsp = self.opener.open(open_url)
+                break
+            except HTTPError as e:
+                sleep(self.SLEEP_TIME)
+                try_time += 1
+                print(e)
+                print('try time:'+str(try_time))
+        if rsp is None:
+            print('failed open url:'+open_url)
+            return
         return_json = json.loads(rsp.read().decode())
         card_group = return_json[0]['card_group']
         next_cursor = return_json[0]['next_cursor']
@@ -343,7 +390,7 @@ class WeiboCrawler:
 
         c = '3963770537235924&type=comment&hot=0&page=2'
         for group in card_group:
-            self.print_info(group)
+            # self.print_info(group)
             mblog = group['mblog']
             curr_blog_id = mblog['id']
             user = mblog['user']
@@ -363,7 +410,7 @@ class WeiboCrawler:
             next_cursor = return_json[0]['next_cursor']
             previous_cursor = return_json[0]['previous_cursor']
             for group in card_group:
-                self.print_info(group)
+                # self.print_info(group)
                 mblog = group['mblog']
                 curr_blog_id = mblog['id']
                 user = mblog['user']
@@ -372,40 +419,55 @@ class WeiboCrawler:
         return
 
     def grab_fans(self, user_id):
-        address_re = re.compile('.*<div class="item-info-page"><span>所在地</span><p>(.*?)</p></div>.*')
-        gender_re = re.compile('.*<div class="item-info-page"><span>性别</span><p>(.*?)</p></div>.*')
-        email_re = re.compile('.*<div class="item-info-page"><span>邮箱</span><p>(.*?)</p></div>.*')
-        edu_re = re.compile('.*<div class="item-info-page"><span>大学</span><p>(.*?)</p><p>(.*?)</p><p>(.*?)</p></div>.*')
-        page = 1
-        seed_url = 'http://m.weibo.cn/page/json?containerid=1005052210643391_-_FANS&page='+str(page)
-        rsp = self.opener.open(seed_url)
+        page = 0
+        seed_url = 'http://m.weibo.cn/page/json?containerid=100505'+str(user_id)+'_-_FANS&page='
+        print(seed_url+str(page))
+        rsp = self.opener.open(seed_url+str(page))
         return_json = json.loads(rsp.read().decode())
-
+        max_page = 1
         cards = return_json['cards']
-
+        count = 0
+        print('----cards--'+str(cards))
         for card in cards:
+            print('card' + str(card))
             max_page = card['maxPage']
-            while page <= max_page:
+            if card.__contains__('card_group'):
+                card_group = card['card_group']
+                count += card_group.__len__()
+                print(card_group.__len__())
+                for c in card_group:
+                    follower = c['user']['id']
+                    exist = Fans.objects.filter(user_id=follower).filter(follow_user_id=user_id)
+                    if not exist:
+                        fans = Fans()
+                        fans.follow_user_id = user_id
+                        fans.user_id = c['user']['id']
+                        fans.save()
+                        print(c['user']['screen_name'])
+        page += 1
+        while page <= max_page:
+            rsp = self.opener.open(seed_url+str(page))
+            return_json = json.loads(rsp.read().decode())
+            cards = return_json['cards']
+            for card in cards:
 
                 if card.__contains__('card_group'):
                     card_group = card['card_group']
+                    count += card_group.__len__()
+                    print(card_group.__len__())
                     for c in card_group:
-                        # print(c['user']['id'])
-                        rsp = self.opener.open('http://m.weibo.cn/users/'+str(c['user']['id'])+'?')
-                        html = rsp.read().decode()
-                        address = address_re.match(html)
-                        if address:
-                            print('address:'+address.group(1))
+                        follower = c['user']['id']
+                        exist = Fans.objects.filter(user_id=follower).filter(follow_user_id=user_id)
 
-                        gender = gender_re.match(html)
-                        if gender:
-                            print('gender:'+gender.group(1))
-                        email = email_re.match(html)
-                        if email:
-                            print('email:'+email.group(1))
-                        edu = edu_re.match(html)
-                        if edu:
-                            print('edu:'+edu.group(1))
+                        if not exist:
+                            fans = Fans()
+                            fans.follow_user_id = user_id
+                            fans.user_id = c['user']['id']
+                            fans.save()
+                            # print(c['user']['screen_name'])
+
+            page += 1
+        # print(count)
 
 
 def main():

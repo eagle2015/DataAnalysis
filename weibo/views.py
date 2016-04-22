@@ -6,4 +6,4 @@ from weibo.weibocrawler import WeiboCrawler
 def start(request):
     my = WeiboCrawler("", "")
     my.start()
-    return
+    return HttpResponse('ok')
