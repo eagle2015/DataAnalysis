@@ -375,6 +375,7 @@ class WeiboCrawler:
             except HTTPError as e:
                 sleep(self.SLEEP_TIME)
                 try_time += 1
+                self.change_header()
                 print(e)
                 print('try time:'+str(try_time))
         if rsp is None:
