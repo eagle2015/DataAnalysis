@@ -3,11 +3,11 @@ __author__ = 'Administrator'
 import http.cookiejar
 import urllib.request
 from urllib.error import *
+from queue import Queue
+from threading import Thread
 import urllib.parse
 import json
-from bs4 import BeautifulSoup
 import re
-import redis
 import os
 
 from time import sleep, localtime, strftime
@@ -15,7 +15,7 @@ from weibo.models import WeiboUser, Blog, Comment, Fans
 
 
 class WeiboCrawler:
-    def __init__(self, user, password):
+    def __init__(self, user, password, thread_num=5):
         self.user = user
         self.password = password
         self.opener = self.make_my_opener()
@@ -34,8 +34,12 @@ class WeiboCrawler:
             'User-Agent': 'Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36'
                           ' (KHTML, like Gecko) Chrome/37.0.2062.124 Safari/537.36'
         }
+        self.thread_num = thread_num  # 线程数
         self.TRY_TIMES = 10
         self.SLEEP_TIME = 5
+        self.job_queue = Queue()  # 任务队列
+        self.failed_job_queue = Queue()  # 打开失败的任务队列
+        self.start_thread()
         self.user_id = None
         self.stage_id = None
         # self.seed = 'http://m.weibo.cn/login?ns=1&backURL=http%3A%2F%2Fm.weibo.cn%2F&backTitle=%CE%A2%B2%A9&vt=4&'
@@ -50,6 +54,27 @@ class WeiboCrawler:
 
         self.opener.add_handler(proxy_handler)
 
+    # 开启多线程
+    def start_thread(self):
+        for i in range(self.thread_num):
+            curr_thread = Thread(target=self.comment_working)
+            curr_thread.setDaemon(True)
+            curr_thread.start()
+
+    def comment_working(self):
+        while True:
+            job_dic = self.job_queue.get()
+            try:
+                comment_json = self.get_comment(job_dic['url'])
+                if 'card_group' in comment_json:
+                    comment_card_group = comment_json['card_group']
+                    for comment_group in comment_card_group:
+                        comment_group['blog_id'] = job_dic['blog_id']
+                        self.insert_comment_info(comment_group)
+            except Exception:
+                self.failed_job_queue.put(job_dic)
+            self.job_queue.task_done()
+
     def login(self):
         args = {
             'username': '767543579@qq.com',
@@ -58,7 +83,8 @@ class WeiboCrawler:
             'ec': 0,
             'pagerefer': 'https://passport.weibo.cn/signin/'
                          'welcome?entry=mweibo&r=http%3A%2F%2Fm.weibo.cn%2F&wm=3349&vt=4',
-            'entry': 'mweibo',
+            'entry': 'mweibo'
+            '''
             'wentry': '',
             'loginfrom': '',
             'client_id': '',
@@ -66,6 +92,7 @@ class WeiboCrawler:
             'qq': '',
             'hff': '',
             'hfp': ''
+            '''
         }
 
         post_data = urllib.parse.urlencode(args).encode()
@@ -86,8 +113,6 @@ class WeiboCrawler:
         # html = BeautifulSoup(rsp.read().decode())
         print('stage'+self.stage_id)
         print('uid'+self.user_id)
-
-
 
     def make_my_opener(self):
         """
@@ -161,8 +186,9 @@ class WeiboCrawler:
                 self.insert_pic_info(pic)
                 blog_pic_ids += pic['pid']+','
         blog_retweet_id = ''
+
         if blog_info.__contains__('retweeted_status'):
-            self.insert_blog_info(blog_info['retweeted_status'])
+            #  self.insert_blog_info(blog_info['retweeted_status'])  TODO
             blog_retweet_id += blog_info['retweeted_status']['idstr']
         if self.insert_user_info(blog_info['user']):
             try:
@@ -204,7 +230,7 @@ class WeiboCrawler:
         except WeiboUser.DoesNotExist:
             user = WeiboUser()
         user.user_id = str(user_id)
-        rsp = self.opener.open('http://m.weibo.cn/users/'+str(user_id)+'?')
+        rsp = self.get_rsp('http://m.weibo.cn/users/'+str(user_id)+'?')
         html = rsp.read().decode()
         address = address_re.match(html)
         if address:
@@ -249,8 +275,10 @@ class WeiboCrawler:
         page = 1
         url = 'http://m.weibo.cn/page/json?containerid='+str(self.stage_id)+'_-_WEIBO_SECOND_PROFILE_WEIBO' \
                                                                             '&page='+str(page)
-        print("正在打开："+url)
-        rsp = self.opener.open(url)
+
+        rsp = self.get_rsp(url)
+        if rsp is None:
+            return
         return_json = json.loads(rsp.read().decode())
         print('返回数据：'+str(return_json))
         card = return_json['cards'][0]
@@ -264,10 +292,10 @@ class WeiboCrawler:
         page += 1
 
         while page <= max_page:
-            url = 'http://m.weibo.cn/page/json?containerid='+str(self.stage_id)+'-_WEIBO_SECOND_PROFILE_WEIBO&' \
+            url = 'http://m.weibo.cn/page/json?containerid='+str(self.stage_id)+'_-_WEIBO_SECOND_PROFILE_WEIBO&' \
                                                                                 'page='+str(page)
-            print("正在打开："+url)
-            rsp = self.opener.open(url)
+
+            rsp = self.get_rsp(url)
             return_json = json.loads(rsp.read().decode())
             print('返回数据：'+str(return_json))
             cards = return_json['cards']
@@ -298,7 +326,7 @@ class WeiboCrawler:
 
     def save_pic(self):
         url = 'http://ww2.sinaimg.cn/large/c0788b86jw1f2xfstebzaj20dc0hst9r.jpg'
-        rsp = self.opener.open(url)
+        rsp = self.get_rsp(url)
         pic_data = rsp.read()
         try:
             file = open("d:\\weibo_pic\\1.jpg", 'wb')
@@ -309,27 +337,18 @@ class WeiboCrawler:
         except FileExistsError:
             pass
 
-    def get_comment_by_page(self, blog_id, page_num):
+    def get_comment(self, url):
+        """
         url = 'http://m.weibo.cn/single/rcList?format=cards&id='
         req_url = url + str(blog_id) + '&type=comment&hot=0&page='+str(page_num)
-        print('浏览器正在打开url：'+req_url)
-        rsp = None
-        time = 0
-        while time <= self.TRY_TIMES:
-            try:
-                rsp = self.opener.open(req_url)
-                break
-            except HTTPError as e:
-                sleep(10)
-                time += 1
-                print(e)
-                print('try time:'+str(time))
+        """
+        rsp = self.get_rsp(url)
         if rsp is None:
-            print('can\'t open url'+req_url)
+            print('can\'t open url'+url)
             return
         return_json = json.loads(rsp.read().decode())
         print('请求返回数据:\t'+str(return_json))
-        if page_num == 1:
+        if return_json.__len__() == 2:
             comment_json = return_json[1]
         else:
             comment_json = return_json[0]
@@ -337,8 +356,12 @@ class WeiboCrawler:
 
     def grab_comment(self, blog_id):
         page = 1
-        comment_json = self.get_comment_by_page(blog_id, page)
+        url = 'http://m.weibo.cn/single/rcList?format=cards&id=' + str(blog_id) + '&type=comment&hot=0&page='
+        req_url = url+str(page)
+        comment_json = self.get_comment(req_url)
         print('评论——json\t' + str(comment_json))
+        if comment_json is None:
+            return
         if 'maxPage' not in comment_json:
             return
         max_page = comment_json['maxPage']
@@ -352,6 +375,11 @@ class WeiboCrawler:
         print("总页面数：max_page：\t"+str(max_page))
         while page <= max_page:
             print("curr_page:\t"+str(page)+"\t    max_page\t:"+str(max_page))
+
+            req_url = url+str(page)
+
+            self.job_queue.put({'blog_id': blog_id, 'url': req_url})
+            '''
             comment_json = self.get_comment_by_page(blog_id, page)
             if 'card_group' in comment_json:
                 comment_card_group = comment_json['card_group']
@@ -359,25 +387,36 @@ class WeiboCrawler:
                     comment_group['blog_id'] = blog_id
                     self.insert_comment_info(comment_group)
                     # self.print_comment(comment_group)
+            '''
+            if self.job_queue.qsize() >= 50:
+                self.job_queue.join()
             page += 1
-            sleep(self.SLEEP_TIME)
-            self.change_proxy()
+        self.job_queue.join()
+
+    def get_rsp(self, url):
+        rsp = None
+        time = 0
+        while time <= self.TRY_TIMES:
+            try:
+                print('opening url:'+str(url))
+                rsp = self.opener.open(url)
+                print("opened successful")
+                break
+            except (HTTPError, URLError) as e:
+                sleep(self.SLEEP_TIME)
+                time += 1
+                if 2*time > self.TRY_TIMES:
+                    self.login()  # 重新登录
+                self.change_proxy()  # 换代理
+                print(e)
+                print('try time:'+str(time))
+
+        return rsp
 
     def grab_weibo(self):
         open_url = 'http://m.weibo.cn/index/feed?format=cards'
-        print('浏览器正在打开url：' + open_url)
-        rsp = None
-        try_time = 0
-        while try_time <= self.TRY_TIMES:
-            try:
-                rsp = self.opener.open(open_url)
-                break
-            except HTTPError as e:
-                sleep(self.SLEEP_TIME)
-                try_time += 1
-                self.change_header()
-                print(e)
-                print('try time:'+str(try_time))
+
+        rsp = self.get_rsp(open_url)
         if rsp is None:
             print('failed open url:'+open_url)
             return
@@ -404,8 +443,10 @@ class WeiboCrawler:
             self.change_proxy()
             n -= 1
             open_url = 'http://m.weibo.cn/index/feed?format=cards&next_cursor='+str(next_cursor) + '&page='+str(page)
-            print('浏览器正在打开url：' + open_url)
-            rsp = self.opener.open(open_url)
+            rsp = self.get_rsp(open_url)
+            if rsp is None:
+                print('failed open url:'+open_url)
+                continue
             return_json = json.loads(rsp.read().decode())
             card_group = return_json[0]['card_group']
             next_cursor = return_json[0]['next_cursor']
@@ -422,8 +463,7 @@ class WeiboCrawler:
     def grab_fans(self, user_id):
         page = 0
         seed_url = 'http://m.weibo.cn/page/json?containerid=100505'+str(user_id)+'_-_FANS&page='
-        print(seed_url+str(page))
-        rsp = self.opener.open(seed_url+str(page))
+        rsp = self.get_rsp(seed_url+str(page))
         return_json = json.loads(rsp.read().decode())
         max_page = 1
         cards = return_json['cards']
@@ -447,7 +487,7 @@ class WeiboCrawler:
                         print(c['user']['screen_name'])
         page += 1
         while page <= max_page:
-            rsp = self.opener.open(seed_url+str(page))
+            rsp = self.get_rsp(seed_url+str(page))
             return_json = json.loads(rsp.read().decode())
             cards = return_json['cards']
             for card in cards:
