@@ -231,6 +231,8 @@ class WeiboCrawler:
             user = WeiboUser()
         user.user_id = str(user_id)
         rsp = self.get_rsp('http://m.weibo.cn/users/'+str(user_id)+'?')
+        if rsp is None:
+            return
         html = rsp.read().decode()
         address = address_re.match(html)
         if address:
@@ -403,7 +405,11 @@ class WeiboCrawler:
                 print("opened successful")
                 break
             except (HTTPError, URLError) as e:
-                sleep(self.SLEEP_TIME)
+                sleep(time * self.SLEEP_TIME)
+                try:
+                    self.opener.open('http://m.weibo.cn/')
+                except (HTTPError, URLError):
+                    pass
                 time += 1
                 if 2*time > self.TRY_TIMES:
                     self.login()  # 重新登录
